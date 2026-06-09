@@ -15,6 +15,14 @@ The project is designed for local Windows use. After setup, it does not need int
 
 <img width="1179" height="833" alt="MidiMixMod_Channel_Workbench_v0_1_10" src="https://github.com/user-attachments/assets/71fb8836-109f-4c0e-93a5-919882ba9daf" />
 
+Output Example:
+
+https://github.com/user-attachments/assets/7ac17b06-8bc9-460b-945e-c577fb764fc2
+
+Input Example:
+
+https://github.com/user-attachments/assets/c521607a-535b-40ab-8488-3bf4328672da
+
 ## Basic workflow
 
 1. Open a MIDI file on the **Main** tab.
