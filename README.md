@@ -13,6 +13,8 @@ It is useful when you want to:
 
 The project is designed for local Windows use. After setup, it does not need internet access to edit or play MIDI files.
 
+<img width="1179" height="833" alt="MidiMixMod_Channel_Workbench_v0_1_10" src="https://github.com/user-attachments/assets/71fb8836-109f-4c0e-93a5-919882ba9daf" />
+
 ## Basic workflow
 
 1. Open a MIDI file on the **Main** tab.
