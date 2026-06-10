@@ -168,6 +168,15 @@ Original source / updates: github.com/zeittresor
 
 ## Changelog
 
+### Version 0.1.11 Options cleanup, output folder controls and optional WAV render
+
+- Removed the static Source and Offline install info blocks from the Options tab.
+- Added output/export settings to Options. Modified MIDI files can now be saved beside the original, into an `output` folder beside the app, or into a custom folder.
+- Added an optional checkbox to also save a copy next to the source MIDI when the main output folder is somewhere else.
+- Added **Open current output folder**.
+- Added optional WAV rendering for the current adjusted preview using a local FluidSynth executable plus a selected local `.sf2` / `.sf3` SoundFont.
+- WAV files use versioned names such as `filename_rendered_v001.wav` and existing files are not overwritten.
+
 ### Version 0.1.10 per-action playback modes and instrument tone test
 
 - Options now contains separate internal/external playback choices for original MIDI, selected modified files, current adjusted preview, EQ/Tone preview, channel test playback and instrument tone test playback.
