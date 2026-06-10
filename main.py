@@ -15,6 +15,7 @@ import traceback
 import subprocess
 import time
 import ctypes
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -60,7 +61,7 @@ from PyQt6.QtWidgets import (
 
 
 APP_NAME = "MidiMixMod - MIDI Channel Workbench"
-APP_VERSION = "0.1.10"
+APP_VERSION = "0.1.11"
 SOURCE_NOTICE = "Original source / updates: github.com/zeittresor"
 
 GM_INSTRUMENTS = [
@@ -779,6 +780,8 @@ class MainWindow(QMainWindow):
         self.play_button_base_texts: Dict[QPushButton, str] = {}
         self.playback_mode_combos: Dict[str, QComboBox] = {}
         self.playback_mode_labels: Dict[str, QLabel] = {}
+        self.output_mode = "source"
+        self.output_custom_dir: Optional[Path] = None
         self._focus_targets: List[QWidget] = []
         self._focus_pulse = False
         self._focus_timer = QTimer(self)
@@ -961,20 +964,159 @@ class MainWindow(QMainWindow):
         self._add_playback_mode_row(form, "eq_preview", "Playback mode: EQ/Tone preview", "Wiedergabe: EQ/Klang-Vorschau", "external")
         self._add_playback_mode_row(form, "channel_test", "Playback mode: channel test", "Wiedergabe: Channel-Test", "internal")
         self._add_playback_mode_row(form, "instrument_test", "Playback mode: instrument tone test", "Wiedergabe: Instrument-Tontest", "internal")
-        notice = QLabel(SOURCE_NOTICE)
-        notice.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addRow("Source", notice)
-        offline = QTextEdit()
-        offline.setReadOnly(True)
-        offline.setPlainText(
-            "Offline usage: run setup_online_windows.bat once on a machine with internet. It creates .venv and fills wheelhouse. "
-            "After that, setup_offline_windows.bat installs only from wheelhouse and the app runs locally."
-        )
-        offline.setMaximumHeight(150)
-        form.addRow("Offline install", offline)
+        form.addRow(self._make_separator_label("Output / Export"))
+        self.output_mode_combo = QComboBox()
+        self._populate_output_mode_combo(self.language)
+        self.output_mode_combo.currentIndexChanged.connect(self._on_output_mode_changed)
+        form.addRow("Save modified MIDI to", self.output_mode_combo)
+
+        custom_output_row = QHBoxLayout()
+        self.output_custom_edit = QLineEdit()
+        self.output_custom_edit.setPlaceholderText("Optional custom output folder")
+        self.output_custom_browse_button = QPushButton("Browse output folder...")
+        self.output_custom_browse_button.clicked.connect(self.browse_output_folder)
+        custom_output_row.addWidget(self.output_custom_edit, 1)
+        custom_output_row.addWidget(self.output_custom_browse_button)
+        form.addRow("Custom output folder", custom_output_row)
+
+        self.output_copy_source_checkbox = QCheckBox("Also save a copy next to the source MIDI")
+        self.output_copy_source_checkbox.setChecked(False)
+        form.addRow("Extra copy", self.output_copy_source_checkbox)
+
+        self.open_output_folder_button = QPushButton("Open current output folder")
+        self.open_output_folder_button.clicked.connect(self.open_current_output_folder)
+        form.addRow("Output folder", self.open_output_folder_button)
+
+        form.addRow(self._make_separator_label("Optional WAV rendering"))
+        self.fluidsynth_path_edit = QLineEdit()
+        self.fluidsynth_path_edit.setPlaceholderText("fluidsynth.exe or leave empty to search PATH")
+        fluidsynth_row = QHBoxLayout()
+        self.fluidsynth_browse_button = QPushButton("Browse FluidSynth...")
+        self.fluidsynth_browse_button.clicked.connect(self.browse_fluidsynth_exe)
+        fluidsynth_row.addWidget(self.fluidsynth_path_edit, 1)
+        fluidsynth_row.addWidget(self.fluidsynth_browse_button)
+        form.addRow("FluidSynth executable", fluidsynth_row)
+
+        self.soundfont_path_edit = QLineEdit()
+        self.soundfont_path_edit.setPlaceholderText("Select .sf2 / .sf3 SoundFont")
+        soundfont_row = QHBoxLayout()
+        self.soundfont_browse_button = QPushButton("Browse SoundFont...")
+        self.soundfont_browse_button.clicked.connect(self.browse_soundfont_file)
+        soundfont_row.addWidget(self.soundfont_path_edit, 1)
+        soundfont_row.addWidget(self.soundfont_browse_button)
+        form.addRow("SoundFont", soundfont_row)
+
+        self.render_samplerate_combo = QComboBox()
+        self.render_samplerate_combo.addItems(["22050", "44100", "48000", "96000"])
+        self.render_samplerate_combo.setCurrentText("44100")
+        form.addRow("WAV sample rate", self.render_samplerate_combo)
+
+        render_row = QHBoxLayout()
+        self.render_current_wav_button = QPushButton("Render current adjusted preview as WAV")
+        self.render_current_wav_button.clicked.connect(self.render_current_preview_wav)
+        render_row.addWidget(self.render_current_wav_button)
+        form.addRow(render_row)
+
+        self._on_output_mode_changed()
         scroll.setWidget(content)
         layout.addWidget(scroll)
         self.tabs.addTab(tab, "Options")
+
+    def _make_separator_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet("font-weight: bold; margin-top: 12px;")
+        return label
+
+    def _output_mode_text(self, mode: str, language: Optional[str] = None) -> str:
+        language = language or self.language
+        if language == "Deutsch":
+            return {
+                "source": "Original-MIDI-Ordner",
+                "project_output": "Output-Ordner im Programmverzeichnis",
+                "custom": "Eigener Ausgabeordner",
+            }.get(mode, mode)
+        return {
+            "source": "Original MIDI folder",
+            "project_output": "Output folder in program directory",
+            "custom": "Custom output folder",
+        }.get(mode, mode)
+
+    def _populate_output_mode_combo(self, language: str):
+        if not hasattr(self, "output_mode_combo"):
+            return
+        current_mode = self.output_mode_combo.currentData() or getattr(self, "output_mode", "source")
+        if current_mode not in {"source", "project_output", "custom"}:
+            current_mode = "source"
+        self.output_mode_combo.blockSignals(True)
+        self.output_mode_combo.clear()
+        for mode in ["source", "project_output", "custom"]:
+            self.output_mode_combo.addItem(self._output_mode_text(mode, language), mode)
+        idx = self.output_mode_combo.findData(current_mode)
+        self.output_mode_combo.setCurrentIndex(max(0, idx))
+        self.output_mode_combo.blockSignals(False)
+
+    def _on_output_mode_changed(self):
+        if not hasattr(self, "output_mode_combo"):
+            return
+        data = self.output_mode_combo.currentData()
+        self.output_mode = str(data) if data in {"source", "project_output", "custom"} else "source"
+        custom = self.output_mode == "custom"
+        if hasattr(self, "output_custom_edit"):
+            self.output_custom_edit.setEnabled(custom)
+        if hasattr(self, "output_custom_browse_button"):
+            self.output_custom_browse_button.setEnabled(custom)
+        if hasattr(self, "output_copy_source_checkbox"):
+            self.output_copy_source_checkbox.setEnabled(self.output_mode != "source")
+        if getattr(self, "source_path", None) is not None and hasattr(self, "modified_combo"):
+            self.refresh_modified_history()
+
+    def browse_output_folder(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select output folder", str(self.current_output_directory(create=False)))
+        if not directory:
+            return
+        self.output_custom_dir = Path(directory)
+        self.output_custom_edit.setText(str(self.output_custom_dir))
+
+    def current_output_directory(self, create: bool = True) -> Path:
+        mode = getattr(self, "output_mode", "source")
+        if hasattr(self, "output_mode_combo"):
+            data = self.output_mode_combo.currentData()
+            if data in {"source", "project_output", "custom"}:
+                mode = str(data)
+        if mode == "source":
+            if self.source_path is not None:
+                directory = self.source_path.parent
+            else:
+                directory = Path.cwd()
+        elif mode == "project_output":
+            directory = Path(__file__).resolve().parent / "output"
+        else:
+            text = self.output_custom_edit.text().strip() if hasattr(self, "output_custom_edit") else ""
+            if text:
+                directory = Path(text)
+            elif self.output_custom_dir is not None:
+                directory = self.output_custom_dir
+            else:
+                directory = Path(__file__).resolve().parent / "output"
+        if create:
+            directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def open_current_output_folder(self):
+        try:
+            self._open_file_external(self.current_output_directory(create=True))
+        except Exception as exc:
+            QMessageBox.critical(self, "Open output folder failed", str(exc))
+
+    def browse_fluidsynth_exe(self):
+        file_name, _ = QFileDialog.getOpenFileName(self, "Select FluidSynth executable", "", "Executable files (*.exe);;All files (*.*)")
+        if file_name:
+            self.fluidsynth_path_edit.setText(file_name)
+
+    def browse_soundfont_file(self):
+        file_name, _ = QFileDialog.getOpenFileName(self, "Select SoundFont", "", "SoundFont files (*.sf2 *.sf3);;All files (*.*)")
+        if file_name:
+            self.soundfont_path_edit.setText(file_name)
 
     def _playback_mode_text(self, mode: str, language: Optional[str] = None) -> str:
         language = language or self.language
@@ -1288,16 +1430,19 @@ class MainWindow(QMainWindow):
         transformer = MidiTransformer(copy.deepcopy(self.mid), copy.deepcopy(self.channel_settings), copy.deepcopy(self.eq_settings))
         return transformer.transformed()
 
-    def next_modified_path(self) -> Path:
+    def next_versioned_path(self, directory: Path, suffix: str = "_modified_v", extension: str = ".mid") -> Path:
         if self.source_path is None:
             raise RuntimeError("No source path")
-        directory = self.source_path.parent
+        directory.mkdir(parents=True, exist_ok=True)
         stem = self.source_path.stem
         for idx in range(1, 10000):
-            candidate = directory / f"{stem}_modified_v{idx:03d}.mid"
+            candidate = directory / f"{stem}{suffix}{idx:03d}{extension}"
             if not candidate.exists():
                 return candidate
-        raise RuntimeError("Could not find free modified filename")
+        raise RuntimeError("Could not find free output filename")
+
+    def next_modified_path(self) -> Path:
+        return self.next_versioned_path(self.current_output_directory(create=True), "_modified_v", ".mid")
 
     def save_modified(self):
         if self.mid is None or self.source_path is None:
@@ -1307,9 +1452,15 @@ class MainWindow(QMainWindow):
             out = self.next_modified_path()
             modified = self.build_modified_mid()
             modified.save(out)
-            self.log(f"Saved modified MIDI: {out}")
+            saved_paths = [out]
+            if (hasattr(self, "output_copy_source_checkbox") and self.output_copy_source_checkbox.isChecked()
+                    and out.parent.resolve() != self.source_path.parent.resolve()):
+                copy_path = self.next_versioned_path(self.source_path.parent, "_modified_v", ".mid")
+                modified.save(copy_path)
+                saved_paths.append(copy_path)
+            self.log("Saved modified MIDI:\n" + "\n".join(str(path) for path in saved_paths))
             self.refresh_modified_history(select_path=out)
-            QMessageBox.information(self, "Saved", f"Saved as:\n{out}")
+            QMessageBox.information(self, "Saved", "Saved as:\n" + "\n".join(str(path) for path in saved_paths))
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             self.log(traceback.format_exc())
@@ -1319,13 +1470,68 @@ class MainWindow(QMainWindow):
         if self.source_path is None:
             return
         pattern = f"{self.source_path.stem}_modified_v*.mid"
-        files = sorted(self.source_path.parent.glob(pattern))
-        for path in files:
-            self.modified_combo.addItem(path.name, str(path))
+        directories = [self.source_path.parent]
+        try:
+            out_dir = self.current_output_directory(create=False)
+            if out_dir not in directories:
+                directories.append(out_dir)
+        except Exception:
+            pass
+        seen = set()
+        files = []
+        for directory in directories:
+            try:
+                for path in directory.glob(pattern):
+                    resolved = str(path.resolve())
+                    if resolved not in seen:
+                        seen.add(resolved)
+                        files.append(path)
+            except Exception:
+                continue
+        for path in sorted(files):
+            label = path.name if path.parent == self.source_path.parent else f"{path.name}  [{path.parent}]"
+            self.modified_combo.addItem(label, str(path))
         if select_path:
             idx = self.modified_combo.findData(str(select_path))
             if idx >= 0:
                 self.modified_combo.setCurrentIndex(idx)
+
+    def render_current_preview_wav(self):
+        if self.mid is None or self.source_path is None:
+            QMessageBox.warning(self, "No MIDI", "Please load a MIDI file first.")
+            return
+        try:
+            synth_text = self.fluidsynth_path_edit.text().strip() if hasattr(self, "fluidsynth_path_edit") else ""
+            synth = Path(synth_text) if synth_text else None
+            if synth is None:
+                found = shutil.which("fluidsynth")
+                if found:
+                    synth = Path(found)
+            if synth is None or not synth.exists():
+                raise RuntimeError("FluidSynth executable not found. Select fluidsynth.exe in Options or add it to PATH.")
+            sf_text = self.soundfont_path_edit.text().strip() if hasattr(self, "soundfont_path_edit") else ""
+            if not sf_text:
+                raise RuntimeError("No SoundFont selected. Select a local .sf2 or .sf3 file in Options.")
+            soundfont = Path(sf_text)
+            if not soundfont.exists():
+                raise RuntimeError(f"SoundFont not found: {soundfont}")
+            midi_path = self._write_preview_file()
+            wav_path = self.next_versioned_path(self.current_output_directory(create=True), "_rendered_v", ".wav")
+            sample_rate = int(self.render_samplerate_combo.currentText()) if hasattr(self, "render_samplerate_combo") else 44100
+            cmd = [str(synth), "-ni", "-F", str(wav_path), "-r", str(sample_rate), str(soundfont), str(midi_path)]
+            creationflags = 0
+            if sys.platform.startswith("win") and hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creationflags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+            self.log("Rendering WAV with FluidSynth...")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=creationflags)
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "FluidSynth render failed").strip())
+            self.log(f"Rendered WAV: {wav_path}")
+            QMessageBox.information(self, "Rendered", f"Rendered WAV as:\n{wav_path}")
+            self.refresh_modified_history()
+        except Exception as exc:
+            QMessageBox.critical(self, "WAV render failed", str(exc))
+            self.log(traceback.format_exc())
 
     def current_output_name(self) -> Optional[str]:
         text = self.port_combo.currentText().strip()
@@ -1571,6 +1777,18 @@ class MainWindow(QMainWindow):
             self.refresh_ports_button.setText("MIDI-Ausgänge aktualisieren")
             self.eq_preview_button.setText("Mit aktuellen EQ/Klangwerten abspielen")
             self.eq_save_button.setText("Mit aktuellen EQ/Klangwerten speichern")
+            if hasattr(self, "output_custom_browse_button"):
+                self.output_custom_browse_button.setText("Ausgabeordner wählen...")
+            if hasattr(self, "open_output_folder_button"):
+                self.open_output_folder_button.setText("Aktuellen Ausgabeordner öffnen")
+            if hasattr(self, "fluidsynth_browse_button"):
+                self.fluidsynth_browse_button.setText("FluidSynth wählen...")
+            if hasattr(self, "soundfont_browse_button"):
+                self.soundfont_browse_button.setText("SoundFont wählen...")
+            if hasattr(self, "render_current_wav_button"):
+                self.render_current_wav_button.setText("Aktuelle Vorschau als WAV rendern")
+            if hasattr(self, "output_copy_source_checkbox"):
+                self.output_copy_source_checkbox.setText("Zusätzlich Kopie neben der Original-MIDI speichern")
         else:
             self.tabs.setTabText(0, "Main")
             self.tabs.setTabText(1, "Channels / Instruments")
@@ -1586,7 +1804,21 @@ class MainWindow(QMainWindow):
             self.refresh_ports_button.setText("Refresh MIDI outputs")
             self.eq_preview_button.setText("Play with current EQ settings")
             self.eq_save_button.setText("Save with current EQ settings")
+            if hasattr(self, "output_custom_browse_button"):
+                self.output_custom_browse_button.setText("Browse output folder...")
+            if hasattr(self, "open_output_folder_button"):
+                self.open_output_folder_button.setText("Open current output folder")
+            if hasattr(self, "fluidsynth_browse_button"):
+                self.fluidsynth_browse_button.setText("Browse FluidSynth...")
+            if hasattr(self, "soundfont_browse_button"):
+                self.soundfont_browse_button.setText("Browse SoundFont...")
+            if hasattr(self, "render_current_wav_button"):
+                self.render_current_wav_button.setText("Render current adjusted preview as WAV")
+            if hasattr(self, "output_copy_source_checkbox"):
+                self.output_copy_source_checkbox.setText("Also save a copy next to the source MIDI")
 
+        if hasattr(self, "output_mode_combo"):
+            self._populate_output_mode_combo(language)
         if hasattr(self, "playback_mode_combos"):
             self._populate_all_playback_mode_combos(language)
 
